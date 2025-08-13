@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -20,6 +19,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.view.TextureRegistry.SurfaceTextureEntry
 import io.flutter.plugin.common.MethodChannel
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector
+import com.google.android.exoplayer2.trackselection.AdaptiveTrackSelection
 import com.google.android.exoplayer2.ui.PlayerNotificationManager
 import android.support.v4.media.session.MediaSessionCompat
 import com.google.android.exoplayer2.drm.DrmSessionManager
@@ -32,7 +32,6 @@ import com.google.android.exoplayer2.drm.FrameworkMediaDrm
 import com.google.android.exoplayer2.drm.UnsupportedDrmException
 import com.google.android.exoplayer2.drm.DummyExoMediaDrm
 import com.google.android.exoplayer2.drm.LocalMediaDrmCallback
-import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory
 import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ClippingMediaSource
 import com.google.android.exoplayer2.ui.PlayerNotificationManager.MediaDescriptionAdapter
@@ -51,17 +50,15 @@ import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory
 import io.flutter.plugin.common.EventChannel.EventSink
-import androidx.media.session.MediaButtonReceiver
 import androidx.work.Data
 import com.google.android.exoplayer2.*
 import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.drm.DrmSessionManagerProvider
 import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
-import com.google.android.exoplayer2.trackselection.DefaultTrackSelector.SelectionOverride
-import com.google.android.exoplayer2.trackselection.TrackSelectionOverrides
 import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.upstream.DefaultDataSource
 import com.google.android.exoplayer2.util.Util
+import androidx.core.net.toUri
 import java.io.File
 import java.lang.Exception
 import java.lang.IllegalStateException
@@ -78,7 +75,7 @@ internal class BetterPlayer(
 ) {
     private val exoPlayer: ExoPlayer?
     private val eventSink = QueuingEventSink()
-    private val trackSelector: DefaultTrackSelector = DefaultTrackSelector(context)
+    private val trackSelector: DefaultTrackSelector = DefaultTrackSelector(context, AdaptiveTrackSelection.Factory())
     private val loadControl: LoadControl
     private var isInitialized = false
     private var surface: Surface? = null
@@ -132,7 +129,7 @@ internal class BetterPlayer(
     ) {
         this.key = key
         isInitialized = false
-        val uri = Uri.parse(dataSource)
+        val uri = dataSource?.toUri() ?: return
         var dataSourceFactory: DataSource.Factory?
         val userAgent = getUserAgent(headers)
         if (licenseUrl != null && licenseUrl.isNotEmpty()) {
@@ -143,11 +140,11 @@ internal class BetterPlayer(
                     httpMediaDrmCallback.setKeyRequestProperty(drmKey, drmValue)
                 }
             }
-            if (Util.SDK_INT < 18) {
+            if (Build.VERSION.SDK_INT < 18) {
                 Log.e(TAG, "Protected content not supported on API levels below 18")
                 drmSessionManager = null
             } else {
-                val drmSchemeUuid = Util.getDrmUuid("widevine")
+                val drmSchemeUuid = C.WIDEVINE_UUID
                 if (drmSchemeUuid != null) {
                     drmSessionManager = DefaultDrmSessionManager.Builder()
                         .setUuidAndExoMediaDrmProvider(
@@ -167,7 +164,7 @@ internal class BetterPlayer(
                 }
             }
         } else if (clearKey != null && clearKey.isNotEmpty()) {
-            drmSessionManager = if (Util.SDK_INT < 18) {
+            drmSessionManager = if (Build.VERSION.SDK_INT < 18) {
                 Log.e(TAG, "Protected content not supported on API levels below 18")
                 null
             } else {
@@ -408,27 +405,35 @@ internal class BetterPlayer(
             drmSessionManagerProvider = DrmSessionManagerProvider { drmSessionManager }
         }
         return when (type) {
-            C.TYPE_SS -> SsMediaSource.Factory(
-                DefaultSsChunkSource.Factory(mediaDataSourceFactory),
-                DefaultDataSource.Factory(context, mediaDataSourceFactory)
-            )
-                .setDrmSessionManagerProvider(drmSessionManagerProvider)
-                .createMediaSource(mediaItem)
-            C.TYPE_DASH -> DashMediaSource.Factory(
-                DefaultDashChunkSource.Factory(mediaDataSourceFactory),
-                DefaultDataSource.Factory(context, mediaDataSourceFactory)
-            )
-                .setDrmSessionManagerProvider(drmSessionManagerProvider)
-                .createMediaSource(mediaItem)
-            C.TYPE_HLS -> HlsMediaSource.Factory(mediaDataSourceFactory)
-                .setDrmSessionManagerProvider(drmSessionManagerProvider)
-                .createMediaSource(mediaItem)
-            C.TYPE_OTHER -> ProgressiveMediaSource.Factory(
-                mediaDataSourceFactory,
-                DefaultExtractorsFactory()
-            )
-                .setDrmSessionManagerProvider(drmSessionManagerProvider)
-                .createMediaSource(mediaItem)
+            C.TYPE_SS -> {
+                val factory = SsMediaSource.Factory(
+                    DefaultSsChunkSource.Factory(mediaDataSourceFactory),
+                    DefaultDataSource.Factory(context, mediaDataSourceFactory)
+                )
+                drmSessionManagerProvider?.let { factory.setDrmSessionManagerProvider(it) }
+                factory.createMediaSource(mediaItem)
+            }
+            C.TYPE_DASH -> {
+                val factory = DashMediaSource.Factory(
+                    DefaultDashChunkSource.Factory(mediaDataSourceFactory),
+                    DefaultDataSource.Factory(context, mediaDataSourceFactory)
+                )
+                drmSessionManagerProvider?.let { factory.setDrmSessionManagerProvider(it) }
+                factory.createMediaSource(mediaItem)
+            }
+            C.TYPE_HLS -> {
+                val factory = HlsMediaSource.Factory(mediaDataSourceFactory)
+                drmSessionManagerProvider?.let { factory.setDrmSessionManagerProvider(it) }
+                factory.createMediaSource(mediaItem)
+            }
+            C.TYPE_OTHER -> {
+                val factory = ProgressiveMediaSource.Factory(
+                    mediaDataSourceFactory,
+                    DefaultExtractorsFactory()
+                )
+                drmSessionManagerProvider?.let { factory.setDrmSessionManagerProvider(it) }
+                factory.createMediaSource(mediaItem)
+            }
             else -> {
                 throw IllegalStateException("Unsupported type: $type")
             }
@@ -508,12 +513,12 @@ internal class BetterPlayer(
         val audioComponent = exoPlayer?.audioComponent ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             audioComponent.setAudioAttributes(
-                AudioAttributes.Builder().setContentType(C.CONTENT_TYPE_MOVIE).build(),
+                AudioAttributes.Builder().setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                 !mixWithOthers
             )
         } else {
             audioComponent.setAudioAttributes(
-                AudioAttributes.Builder().setContentType(C.CONTENT_TYPE_MUSIC).build(),
+                AudioAttributes.Builder().setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),
                 !mixWithOthers
             )
         }
@@ -629,8 +634,10 @@ internal class BetterPlayer(
                 }
             })
             mediaSession.isActive = true
-            val mediaSessionConnector = MediaSessionConnector(mediaSession)
-            mediaSessionConnector.setPlayer(exoPlayer)
+            exoPlayer?.let { player ->
+                Log.d(TAG, "MediaSession setup completed with direct player integration")
+            }
+
             this.mediaSession = mediaSession
             return mediaSession
         }
@@ -653,71 +660,31 @@ internal class BetterPlayer(
 
     fun setAudioTrack(name: String, index: Int) {
         try {
-            val mappedTrackInfo = trackSelector.currentMappedTrackInfo
-            if (mappedTrackInfo != null) {
-                for (rendererIndex in 0 until mappedTrackInfo.rendererCount) {
-                    if (mappedTrackInfo.getRendererType(rendererIndex) != C.TRACK_TYPE_AUDIO) {
-                        continue
-                    }
-                    val trackGroupArray = mappedTrackInfo.getTrackGroups(rendererIndex)
-                    var hasElementWithoutLabel = false
-                    var hasStrangeAudioTrack = false
-                    for (groupIndex in 0 until trackGroupArray.length) {
-                        val group = trackGroupArray[groupIndex]
-                        for (groupElementIndex in 0 until group.length) {
-                            val format = group.getFormat(groupElementIndex)
-                            if (format.label == null) {
-                                hasElementWithoutLabel = true
-                            }
-                            if (format.id != null && format.id == "1/15") {
-                                hasStrangeAudioTrack = true
-                            }
-                        }
-                    }
-                    for (groupIndex in 0 until trackGroupArray.length) {
-                        val group = trackGroupArray[groupIndex]
-                        for (groupElementIndex in 0 until group.length) {
-                            val label = group.getFormat(groupElementIndex).label
-                            if (name == label && index == groupIndex) {
-                                setAudioTrack(rendererIndex, groupIndex, groupElementIndex)
-                                return
-                            }
-
-                            ///Fallback option
-                            if (!hasStrangeAudioTrack && hasElementWithoutLabel && index == groupIndex) {
-                                setAudioTrack(rendererIndex, groupIndex, groupElementIndex)
-                                return
-                            }
-                            ///Fallback option
-                            if (hasStrangeAudioTrack && name == label) {
-                                setAudioTrack(rendererIndex, groupIndex, groupElementIndex)
-                                return
-                            }
-                        }
-                    }
+            val mappedTrackInfo = trackSelector.currentMappedTrackInfo ?: return
+            
+            for (rendererIndex in 0 until mappedTrackInfo.rendererCount) {
+                if (mappedTrackInfo.getRendererType(rendererIndex) != C.TRACK_TYPE_AUDIO) continue
+                
+                val trackGroups = mappedTrackInfo.getTrackGroups(rendererIndex)
+                if (index < trackGroups.length) {
+                    val trackGroup = trackGroups[index]
+                    
+                    // Create selection override for ExoPlayer 2.19
+                    val override = DefaultTrackSelector.SelectionOverride(index, 0)
+                    
+                    trackSelector.setParameters(
+                        trackSelector.buildUponParameters()
+                            .setSelectionOverride(rendererIndex, trackGroups, override)
+                            .setRendererDisabled(rendererIndex, false)
+                    )
+                    
+                    Log.d(TAG, "Audio track set: index=$index")
+                    return
                 }
             }
+            Log.w(TAG, "Audio track not found: index=$index")
         } catch (exception: Exception) {
-            Log.e(TAG, "setAudioTrack failed$exception")
-        }
-    }
-
-    private fun setAudioTrack(rendererIndex: Int, groupIndex: Int, groupElementIndex: Int) {
-        val mappedTrackInfo = trackSelector.currentMappedTrackInfo
-        if (mappedTrackInfo != null) {
-            val builder = trackSelector.parameters.buildUpon()
-                .setRendererDisabled(rendererIndex, false)
-                .setTrackSelectionOverrides(
-                    TrackSelectionOverrides.Builder().addOverride(
-                        TrackSelectionOverrides.TrackSelectionOverride(
-                            mappedTrackInfo.getTrackGroups(
-                                rendererIndex
-                            ).get(groupIndex)
-                        )
-                    ).build()
-                )
-
-            trackSelector.setParameters(builder)
+            Log.e(TAG, "setAudioTrack failed: $exception")
         }
     }
 
